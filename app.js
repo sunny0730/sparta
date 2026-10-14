@@ -28,8 +28,49 @@ function update(next) {
  tasks = next; storageProblem = false; $('save-state').replaceChildren();
  const dot = document.createElement('i'); $('save-state').append(dot, ' 이 브라우저에 자동 저장'); render(); return true;
 }
+const WRITING_KEY='chageun.writing.v1';
+let writing={diary:{},memos:[],draft:''},writingProblem=false,writingDirty=false;
+function validWriting(data){
+ return data&&typeof data==='object'&&!Array.isArray(data)&&data.diary&&typeof data.diary==='object'&&!Array.isArray(data.diary)&&Object.keys(data.diary).length<=10000&&Object.entries(data.diary).every(([date,text])=>validDate(date)&&typeof text==='string'&&text.length<=50000)&&Array.isArray(data.memos)&&data.memos.length<=1000&&data.memos.every(m=>m&&typeof m.id==='string'&&m.id&&typeof m.text==='string'&&m.text.length<=10000&&typeof m.createdAt==='string'&&!Number.isNaN(Date.parse(m.createdAt)))&&new Set(data.memos.map(m=>m.id)).size===data.memos.length&&typeof data.draft==='string'&&data.draft.length<=10000;
+}
+function normalizeWriting(data){return{diary:{...data.diary},memos:data.memos.map(m=>({id:m.id,text:m.text,createdAt:m.createdAt})),draft:data.draft};}
+try{const raw=localStorage.getItem(WRITING_KEY);if(raw){const parsed=JSON.parse(raw);if(!validWriting(parsed))throw new Error('Invalid writing');writing=normalizeWriting(parsed);}}
+catch{writingProblem=true;}
+function writingStatus(){
+ $('writing-status').textContent=writingProblem?'기존 기록을 읽지 못했어요':writingDirty?'아직 저장하지 못했어요':'이 PC에 자동 저장';
+ $('writing-status').classList.toggle('save-error',writingProblem||writingDirty);$('retry-writing').hidden=!writingDirty||writingProblem;
+ $('diary-input').disabled=writingProblem;$('memo-input').disabled=writingProblem;$('memo-form').querySelector('button').disabled=writingProblem;
+}
+function storeWriting(next){
+ if(writingProblem){notify('기존 기록을 보호하기 위해 저장을 멈췄어요.');return false;}
+ const previousFailure=writingDirty;writing=next;
+ try{localStorage.setItem(WRITING_KEY,JSON.stringify(writing));writingDirty=false;writingStatus();return true;}
+ catch{writingDirty=true;writingStatus();if(!previousFailure)notify('기록을 저장하지 못했어요. 창을 닫기 전에 전체 백업으로 보관해 주세요.');return false;}
+}
+function renderWriting(){
+ const d=parseDate(selectedDate);$('diary-heading').textContent=selectedDate===dateKey(new Date())?'오늘의 일기':'이날의 일기';$('diary-date').textContent=`${d.getFullYear()}년 ${d.getMonth()+1}월 ${d.getDate()}일`;
+ const entry=writing.diary[selectedDate]||'';if($('diary-input').value!==entry)$('diary-input').value=entry;
+ if($('memo-input').value!==writing.draft)$('memo-input').value=writing.draft;
+ $('memo-list').replaceChildren();$('memo-empty').hidden=writing.memos.length>0;
+ for(const memo of [...writing.memos].reverse()){
+  const card=document.createElement('article');card.className='memo-card';
+  const heading=document.createElement('div');heading.className='memo-card-heading';const time=document.createElement('time');time.dateTime=memo.createdAt;time.textContent=new Date(memo.createdAt).toLocaleString('ko-KR',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  const remove=document.createElement('button');remove.type='button';remove.textContent='삭제';remove.className='memo-delete';remove.setAttribute('aria-label','업무 메모 삭제');remove.disabled=writingProblem;
+  remove.onclick=()=>{if(window.confirm('이 업무 메모를 삭제할까요?')){storeWriting({...writing,memos:writing.memos.filter(m=>m.id!==memo.id)});renderWriting();}};
+  const input=document.createElement('textarea');input.maxLength=10000;input.value=memo.text;input.setAttribute('aria-label','저장한 업무 메모 수정');input.disabled=writingProblem;
+  input.oninput=()=>storeWriting({...writing,memos:writing.memos.map(m=>m.id===memo.id?{...m,text:input.value}:m)});
+  heading.append(time,remove);card.append(heading,input);$('memo-list').append(card);
+ }
+ writingStatus();
+}
+$('diary-input').oninput=()=>{const diary={...writing.diary};if($('diary-input').value)diary[selectedDate]=$('diary-input').value;else delete diary[selectedDate];storeWriting({...writing,diary});};
+$('memo-input').oninput=()=>storeWriting({...writing,draft:$('memo-input').value});
+$('memo-form').onsubmit=e=>{e.preventDefault();if(writingProblem)return;const text=$('memo-input').value.trim();if(!text){$('memo-input').focus();return;}if(writing.memos.length>=1000){notify('메모가 많아요. 백업 후 오래된 메모를 정리해 주세요.');return;}storeWriting({...writing,draft:'',memos:[...writing.memos,{id:crypto.randomUUID(),text,createdAt:new Date().toISOString()}]});renderWriting();};
+$('retry-writing').onclick=()=>storeWriting(writing);
+window.addEventListener('beforeunload',e=>{if(writingDirty){e.preventDefault();e.returnValue='';}});
 function selectDate(value) { if (!validDate(value)) return; selectedDate = value; filter = 'all'; render(); }
 function render() {
+ renderWriting();
  const today = dateKey(new Date()), date = parseDate(selectedDate), days = ['일','월','화','수','목','금','토'];
  $('month-label').textContent = `${date.getFullYear()}년 ${date.getMonth()+1}월`;
  $('date-title').textContent = `${date.getMonth()+1}월 ${date.getDate()}일, ${days[date.getDay()]}요일`;
@@ -101,10 +142,11 @@ $('delete-task').onclick=()=>{
 };
 $('undo').onclick=()=>{if(!deleted)return;const {task,index}=deleted,next=[...tasks];next.splice(index,0,task);if(update(next)){deleted=null;selectDate(task.date);notify('일정을 되돌렸어요.');}};
 $('export').onclick=()=>{
- if(storageProblem){notify('저장된 데이터를 읽지 못했어요. 원본 보존을 위해 백업을 중단했어요.');return;}
- const blob=new Blob([JSON.stringify({app:'차근',version:1,tasks},null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`차근-일정-${dateKey(new Date())}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);notify('일정 백업 파일을 저장했어요.');
+ if(storageProblem||writingProblem){notify('저장된 데이터를 읽지 못했어요. 원본 보존을 위해 백업을 중단했어요.');return;}
+ const blob=new Blob([JSON.stringify({app:'차근',version:1,tasks,writing},null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`차근-전체백업-${dateKey(new Date())}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);notify('할 일·일기·메모를 백업 파일로 저장했어요.');
 };
 window.addEventListener('storage',e=>{if(e.key===KEY){try{const data=e.newValue?JSON.parse(e.newValue):[];if(Array.isArray(data)&&data.every(t=>t&&typeof t.id==='string'&&typeof t.title==='string'&&validDate(t.date)&&validTime(t.time)&&typeof t.done==='boolean')){tasks=data;render();}}catch{notify('다른 창의 저장 내용을 읽지 못했어요.');}}});
+window.addEventListener('storage',e=>{if(e.key===WRITING_KEY&&!writingDirty){try{const data=e.newValue?JSON.parse(e.newValue):{diary:{},memos:[],draft:''};if(!validWriting(data))throw new Error('Invalid writing');writing=normalizeWriting(data);writingProblem=false;renderWriting();}catch{writingProblem=true;writingStatus();}}});
 initializeBuddy();
 render();
 if(storageProblem){$('save-state').textContent='저장된 일정 확인이 필요해요';notify('저장된 일정을 읽지 못했어요. 새 일정 저장 전 브라우저 데이터를 확인해 주세요.');}
@@ -173,14 +215,20 @@ $('import-file').onchange=async e=>{
   if(data.app!=='차근'||data.version!==1||!Array.isArray(data.tasks)||data.tasks.length>10000)throw new Error('invalid backup');
   const imported=data.tasks;
   if(imported.some(t=>!t||typeof t.id!=='string'||!t.id||typeof t.title!=='string'||!t.title.trim()||t.title.length>120||!validDate(t.date)||!validTime(t.time)||typeof t.done!=='boolean')||new Set(imported.map(t=>t.id)).size!==imported.length)throw new Error('invalid tasks');
-  if(storageProblem){notify('현재 저장 데이터에 문제가 있어요. 원본을 보호하기 위해 복원을 멈췄어요.');return;}
-  if(!imported.length){notify('백업 파일에 일정이 없어요.');return;}
-  const incoming=new Map(imported.map(t=>[t.id,{id:t.id,title:t.title.trim(),date:t.date,time:t.time,done:t.done}]));
-  const duplicate=tasks.filter(t=>incoming.has(t.id)).length;
-  if(!window.confirm(`백업에서 일정 ${imported.length}개를 불러올까요? 기존의 다른 일정은 유지됩니다.${duplicate?` 같은 ID의 일정 ${duplicate}개는 백업 내용으로 바뀝니다.`:''}`))return;
-  const next=tasks.map(t=>incoming.has(t.id)?incoming.get(t.id):t),existing=new Set(tasks.map(t=>t.id));
-  next.push(...[...incoming.values()].filter(t=>!existing.has(t.id)));
-  if(update(next)){selectDate(dateKey(new Date()));notify('백업 일정을 불러왔어요.');}
- }catch{notify('차근에서 저장한 올바른 일정 백업 파일을 선택해 주세요.');}
+  if(data.writing!==undefined&&!validWriting(data.writing))throw new Error('invalid writing');
+  if(storageProblem||writingProblem){notify('현재 저장 데이터에 문제가 있어 원본을 보호하기 위해 복원을 멈췄어요.');return;}
+  const incomingWriting=data.writing===undefined?null:normalizeWriting(data.writing);
+  if(!imported.length&&(!incomingWriting||(!Object.keys(incomingWriting.diary).length&&!incomingWriting.memos.length&&!incomingWriting.draft))){notify('백업 파일에 기록이 없어요.');return;}
+  if(!window.confirm('백업 내용을 불러올까요? 기존의 다른 기록은 유지됩니다. 같은 일정 ID·메모 ID·일기 날짜의 내용은 백업 내용으로 바뀝니다. 백업에 작성 중 메모가 있으면 현재 작성 중 메모도 바뀝니다.'))return;
+  const incoming=new Map(imported.map(t=>[t.id,{id:t.id,title:t.title.trim(),date:t.date,time:t.time,done:t.done}])),existing=new Set(tasks.map(t=>t.id));
+  const next=tasks.map(t=>incoming.has(t.id)?incoming.get(t.id):t);next.push(...[...incoming.values()].filter(t=>!existing.has(t.id)));
+  let nextWriting=writing;
+  if(incomingWriting){const memos=new Map(writing.memos.map(m=>[m.id,m]));for(const m of incomingWriting.memos)memos.set(m.id,m);nextWriting={diary:{...writing.diary,...incomingWriting.diary},memos:[...memos.values()],draft:incomingWriting.draft||writing.draft};if(!validWriting(nextWriting))throw new Error('merged writing too large');}
+  if(next.length>10000)throw new Error('too many tasks');
+  const oldTasks=localStorage.getItem(KEY),oldWriting=localStorage.getItem(WRITING_KEY);
+  try{localStorage.setItem(WRITING_KEY,JSON.stringify(nextWriting));localStorage.setItem(KEY,JSON.stringify(next));}
+  catch(error){try{if(oldWriting===null)localStorage.removeItem(WRITING_KEY);else localStorage.setItem(WRITING_KEY,oldWriting);if(oldTasks===null)localStorage.removeItem(KEY);else localStorage.setItem(KEY,oldTasks);}catch{notify('복원 중 저장에 실패했어요. 백업 파일을 보관하고 저장 공간을 확인해 주세요.');return;}notify('저장하지 못해 기존 기록으로 되돌렸어요.');return;}
+  tasks=next;writing=nextWriting;writingDirty=false;selectDate(dateKey(new Date()));notify('할 일·일기·메모를 불러왔어요.');
+ }catch{notify('차근에서 저장한 올바른 백업 파일을 선택해 주세요.');}
  finally{e.target.value='';}
 };
